@@ -32,6 +32,20 @@ interface StockQtyManagerInterface
     public function returnQtyToStock(OrderItem $orderItem, ?float $qty = null): void;
 
     /**
+     * Return qty to stock by product ID (without order item context).
+     * Used when replacing a configurable child — returns stock for the old child product.
+     *
+     * @param int $productId
+     * @param float $qty
+     * @param int $websiteId
+     * @throws CouldNotSaveException
+     * @throws InputException
+     * @throws LocalizedException
+     * @throws NoSuchEntityException
+     */
+    public function returnQtyToStockByProductId(int $productId, float $qty, int $websiteId): void;
+
+    /**
      * Return all shipment items to stock (cancel\delete shipment)
      *
      * @param ShipmentInterface $shipment
