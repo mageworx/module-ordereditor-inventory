@@ -34,6 +34,7 @@ use Magento\Sales\Api\Data\ShipmentInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\Order\Item as OrderItem;
 use Magento\Store\Api\WebsiteRepositoryInterface;
+use MageWorx\OrderEditor\Model\StockDebugLogger;
 use MageWorx\OrderEditorInventory\Api\CancelShipmentProcessorInterface;
 use MageWorx\OrderEditorInventory\Api\StockQtyManagerInterface;
 
@@ -124,6 +125,8 @@ class StockQtyManager implements StockQtyManagerInterface
      */
     private $processCancelledShipmentItems;
 
+    private StockDebugLogger $stockDebugLogger;
+
     /**
      * StockQtyManager constructor.
      *
@@ -143,6 +146,7 @@ class StockQtyManager implements StockQtyManagerInterface
      * @param ProcessRefundItemsInterface $processRefundItems
      * @param OrderRepositoryInterface $orderRepository
      * @param CancelShipmentProcessorInterface $processCancelledShipmentItems
+     * @param StockDebugLogger|null $stockDebugLogger
      */
     public function __construct(
         PlaceReservationsForSalesEventInterface              $placeReservationsForSalesEvent,
@@ -160,7 +164,8 @@ class StockQtyManager implements StockQtyManagerInterface
         ItemsToRefundInterfaceFactory                        $itemsToRefundFactory,
         ProcessRefundItemsInterface                          $processRefundItems,
         OrderRepositoryInterface                             $orderRepository,
-        CancelShipmentProcessorInterface                     $processCancelledShipmentItems
+        CancelShipmentProcessorInterface                     $processCancelledShipmentItems,
+        ?StockDebugLogger                                    $stockDebugLogger = null
     ) {
         $this->placeReservationsForSalesEvent              = $placeReservationsForSalesEvent;
         $this->getSkusByProductIds                         = $getSkusByProductIds;
@@ -178,6 +183,7 @@ class StockQtyManager implements StockQtyManagerInterface
         $this->processRefundItems                          = $processRefundItems;
         $this->orderRepository                             = $orderRepository;
         $this->processCancelledShipmentItems               = $processCancelledShipmentItems;
+        $this->stockDebugLogger = $stockDebugLogger ?? \Magento\Framework\App\ObjectManager::getInstance()->get(StockDebugLogger::class);
     }
 
     /**
@@ -190,19 +196,33 @@ class StockQtyManager implements StockQtyManagerInterface
      */
     public function deductQtyFromStock(OrderItem $orderItem, ?float $qty = null): void
     {
+        $this->stockDebugLogger->open('deductQtyFromStock', [
+            'sku'  => $orderItem->getSku(),
+            'type' => $orderItem->getProductType(),
+            'qty'  => $qty,
+        ]);
+
         if ($orderItem->getProductType() === Configurable::TYPE_CODE) {
+            $this->stockDebugLogger->log('branch: configurable — using children items');
             $orderItems = $orderItem->getChildrenItems();
         } elseif ($orderItem->getProductType() === Type::TYPE_CODE) {
+            $this->stockDebugLogger->log('branch: bundle — using children items');
             $orderItems = $orderItem->getChildrenItems();
         } elseif ($orderItem->getParentItemId()) {
+            $this->stockDebugLogger->log('branch: child item — skipping (parent handles deduction)');
+            $this->stockDebugLogger->close('deductQtyFromStock');
             return; // Do not deduct qty of child item manually
         } else {
+            $this->stockDebugLogger->log('branch: simple/other — deducting directly');
             $orderItems = [$orderItem];
         }
 
         foreach ($orderItems as $item) {
+            $this->stockDebugLogger->log('deducting child', ['sku' => $item->getSku(), 'item_id' => $item->getItemId()]);
             $this->deduct($item, $qty);
         }
+
+        $this->stockDebugLogger->close('deductQtyFromStock');
     }
 
     /**
@@ -215,6 +235,11 @@ class StockQtyManager implements StockQtyManagerInterface
      */
     private function deduct(OrderItem $orderItem, ?float $qty = null): void
     {
+        $this->stockDebugLogger->open('deduct', [
+            'sku' => $orderItem->getSku(),
+            'qty' => $qty ?? $orderItem->getQtyOrdered(),
+        ]);
+
         $order = $orderItem->getOrder();
         if (!$order || !$order->getId()) {
             throw new InputException(__('Order Id must be set before processing order item'));
@@ -273,7 +298,9 @@ class StockQtyManager implements StockQtyManagerInterface
             ]
         );
 
+        $this->stockDebugLogger->log('placing reservation', ['items_count' => count($itemsToSell), 'stock_id' => $stockId]);
         $this->placeReservationsForSalesEvent->execute($itemsToSell, $salesChannel, $salesEvent);
+        $this->stockDebugLogger->close('deduct');
     }
 
     /**
@@ -300,6 +327,12 @@ class StockQtyManager implements StockQtyManagerInterface
      */
     public function returnQtyToStock(OrderItem $orderItem, ?float $qty = null): void
     {
+        $this->stockDebugLogger->open('returnQtyToStock', [
+            'sku'  => $orderItem->getSku(),
+            'type' => $orderItem->getProductType(),
+            'qty'  => $qty,
+        ]);
+
         // Similar with return items on creditmemo
         // @see \Magento\InventorySales\Plugin\SalesInventory\ProcessReturnQtyOnCreditMemoPlugin::aroundExecute()
         $order = $orderItem->getOrder(); //@TODO: $order must be OrderEditorOrder
@@ -309,15 +342,20 @@ class StockQtyManager implements StockQtyManagerInterface
 
         if ($orderItem->getProductType() === Configurable::TYPE_CODE) {
             $items = $orderItem->getChildrenItems();
+            $this->stockDebugLogger->log('resolved children for configurable', ['count' => count($items)]);
         } elseif ($orderItem->getProductType() === Type::TYPE_CODE) {
             $items = $orderItem->getChildrenItems();
+            $this->stockDebugLogger->log('resolved children for bundle', ['count' => count($items)]);
         } else {
             $items = [$orderItem];
+            $this->stockDebugLogger->log('simple/other — returning directly');
         }
 
         if (!empty($items)) {
             $this->returnItems($items, $order, $qty);
         }
+
+        $this->stockDebugLogger->close('returnQtyToStock');
     }
 
     /**
@@ -332,6 +370,7 @@ class StockQtyManager implements StockQtyManagerInterface
         /** @var OrderItem|OrderItemInterface $orderItem */
         foreach ($items as $orderItem) {
             $sku = $this->getSkuFromOrderItem->execute($orderItem);
+            $this->stockDebugLogger->log('returnItems: processing item', ['sku' => $sku, 'qty' => $qty, 'item_id' => $orderItem->getItemId()]);
 
             if ($this->isValidItem($sku, $orderItem)) {
                 $refundedOrderItemIds[] = $orderItem->getItemId();
@@ -357,6 +396,77 @@ class StockQtyManager implements StockQtyManagerInterface
         if (!empty($itemsToRefund)) {
             $this->processRefundItems->execute($order, $itemsToRefund, $refundedOrderItemIds);
         }
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function returnQtyToStockByProductId(int $productId, float $qty, int $websiteId): void
+    {
+        $this->stockDebugLogger->open('returnQtyToStockByProductId', [
+            'product_id' => $productId,
+            'qty'        => $qty,
+            'website_id' => $websiteId,
+        ]);
+
+        $productSkus = $this->getSkusByProductIds->execute([$productId]);
+        if (empty($productSkus[$productId])) {
+            $this->stockDebugLogger->log('sku not found for product_id, skipping');
+            $this->stockDebugLogger->close('returnQtyToStockByProductId');
+            return;
+        }
+
+        $sku         = $productSkus[$productId];
+        $productType = $this->getProductTypesBySkus->execute([$sku])[$sku] ?? null;
+
+        if (!$productType || !$this->isSourceItemManagementAllowedForProductType->execute($productType)) {
+            $this->stockDebugLogger->log('source item management not allowed, skipping', ['sku' => $sku, 'type' => $productType]);
+            $this->stockDebugLogger->close('returnQtyToStockByProductId');
+            return;
+        }
+
+        $websiteCode = $this->websiteRepository->getById($websiteId)->getCode();
+
+        $itemsToSell = [
+            $this->itemsToSellFactory->create(
+                [
+                    'sku' => $sku,
+                    'qty' => (float)$qty // positive qty = compensation (return to stock)
+                ]
+            )
+        ];
+
+        /** @var SalesEventExtensionInterface */
+        $salesEventExtension = $this->salesEventExtensionFactory->create(
+            [
+                'data' => [
+                    'objectIncrementId' => 'order_edit_return_' . $productId
+                ]
+            ]
+        );
+
+        /** @var SalesEventInterface $salesEvent */
+        $salesEvent = $this->salesEventFactory->create(
+            [
+                'type'       => SalesEventInterface::EVENT_ORDER_PLACED,
+                'objectType' => SalesEventInterface::OBJECT_TYPE_ORDER,
+                'objectId'   => 'order_edit_return_' . $productId
+            ]
+        );
+
+        $salesEvent->setExtensionAttributes($salesEventExtension);
+        $salesChannel = $this->salesChannelFactory->create(
+            [
+                'data' => [
+                    'type' => SalesChannelInterface::TYPE_WEBSITE,
+                    'code' => $websiteCode
+                ]
+            ]
+        );
+
+        $this->stockDebugLogger->log('placing return reservation', ['sku' => $sku, 'qty' => $qty]);
+        $this->placeReservationsForSalesEvent->execute($itemsToSell, $salesChannel, $salesEvent);
+        $this->stockDebugLogger->close('returnQtyToStockByProductId');
     }
 
     /**

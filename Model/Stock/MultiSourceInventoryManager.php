@@ -42,7 +42,7 @@ class MultiSourceInventoryManager implements StockManagerInterface
      */
     public function registerReturnByProductId(int $productId, float $qty, int $websiteId): void
     {
-        // TODO: Implement registerReturnByProductId() method.
+        $this->stockQtyManager->returnQtyToStockByProductId($productId, $qty, $websiteId);
     }
 
     /**
