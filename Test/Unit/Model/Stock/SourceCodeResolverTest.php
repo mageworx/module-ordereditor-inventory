@@ -4,6 +4,9 @@ declare(strict_types = 1);
 
 namespace MageWorx\OrderEditorInventory\Test\Unit\Model\Stock;
 
+use Magento\Framework\App\ResourceConnection;
+use Magento\Framework\DB\Adapter\AdapterInterface;
+use Magento\Framework\DB\Select;
 use Magento\Framework\TestFramework\Unit\Helper\ObjectManager as ObjectManagerHelper;
 use Magento\InventoryApi\Api\Data\SourceInterface;
 use Magento\InventoryApi\Api\Data\SourceItemInterface;
@@ -84,6 +87,39 @@ class SourceCodeResolverTest extends TestCase
         $resolver = $this->buildResolverWithSources([]);
 
         self::assertNull($resolver->findReturnSource('sku', 1, null));
+    }
+
+    public function testResolveShipmentSourcesJoinsSourceTableOnShipmentEntityId(): void
+    {
+        $conditions = [];
+        $select = $this->createMock(Select::class);
+        $select->method('from')->willReturnSelf();
+        $select->method('where')->willReturnSelf();
+        $select->method('joinInner')->willReturnCallback(
+            function ($table, $condition) use ($select, &$conditions) {
+                $conditions[] = $condition;
+                return $select;
+            }
+        );
+
+        $connection = $this->createMock(AdapterInterface::class);
+        $connection->method('select')->willReturn($select);
+        $connection->method('fetchAll')->willReturn([
+            ['qty' => '2.0000', 'source_code' => 'east'],
+            ['qty' => '1.0000', 'source_code' => 'east'],
+            ['qty' => '3.0000', 'source_code' => 'west'],
+        ]);
+
+        $resourceConnection = $this->createMock(ResourceConnection::class);
+        $resourceConnection->method('getConnection')->willReturn($connection);
+        $resourceConnection->method('getTableName')->willReturnArgument(0);
+
+        $resolver = $this->omHelper->getObject(SourceCodeResolver::class, [
+            'resourceConnection' => $resourceConnection,
+        ]);
+
+        self::assertSame(['east' => 3.0, 'west' => 3.0], $resolver->resolveShipmentSources(10));
+        self::assertSame(['iss.shipment_id = si.parent_id'], $conditions);
     }
 
     /**

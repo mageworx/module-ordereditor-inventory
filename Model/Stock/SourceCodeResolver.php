@@ -57,19 +57,13 @@ class SourceCodeResolver
         $shipmentItemTable = $this->resourceConnection->getTableName('sales_shipment_item');
         $shipmentSourceTable = $this->resourceConnection->getTableName('inventory_shipment_source');
 
-        // Join shipment_item → shipment → inventory_shipment_source by shipment increment_id.
-        // The Magento extension attribute is keyed by shipment, not by item, so all
-        // items in the same shipment share the same source.
+        // inventory_shipment_source is keyed by shipment entity id, not by item,
+        // so all items in the same shipment share the same source.
         $select = $connection->select()
             ->from(['si' => $shipmentItemTable], ['qty'])
             ->joinInner(
-                ['s' => $this->resourceConnection->getTableName('sales_shipment')],
-                's.entity_id = si.parent_id',
-                []
-            )
-            ->joinInner(
                 ['iss' => $shipmentSourceTable],
-                'iss.shipment_id = s.increment_id',
+                'iss.shipment_id = si.parent_id',
                 ['source_code']
             )
             ->where('si.order_item_id = ?', $orderItemId);
